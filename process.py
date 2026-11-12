@@ -1,5 +1,6 @@
 import os
 
+import cv2
 import numpy as np
 import scipy
 from PIL.ImageDraw import ImageDraw
@@ -41,11 +42,6 @@ def load_folder(folder_path: str, show_image: bool = False, maskx=None, masky=No
             print(f"{path} not a fits file")
             return None
 
-        if dark is None:
-            dark = np.zeros_like(img)
-
-        img = np.array(img) - dark
-
         if masky is not None:
             img = img[masky[0]:masky[1], :]
 
@@ -60,8 +56,7 @@ def load_folder(folder_path: str, show_image: bool = False, maskx=None, masky=No
 
         img_stack.append(img)
 
-    median = np.median(img_stack, axis=0)
-    return median
+    return np.median(img_stack, axis=0)
 
 def flat_field_correction(img: np.ndarray, bg: np.ndarray, dark: np.ndarray | None = None):
     if dark is None:
@@ -134,10 +129,7 @@ def percentile_stretching_2(img, perc, overflow):
 
     return img
 
-def fit_2d_gaussian(img,intensity, offset, plot=False):
-    def gaussian2D(x, y, x0, y0, sx, sy, offset, ampl):
-        return ampl * np.exp(-(x - x0) ** 2 / (2 * sx ** 2) - (y - y0) ** 2 / (2 * sy ** 2)) + offset
-
+def fit_2d_gaussian(img,intensity, offset, ypos=None, xpos=None, plot=False, vary_centroid: bool=True):
     def residuals(p, x, y, z):
         height = p["height"].value
         cen_x = p["centroid_x"].value
@@ -154,13 +146,39 @@ def fit_2d_gaussian(img,intensity, offset, plot=False):
 
     xf, yf = np.meshgrid(yf, xf)
 
+    if ypos is None:
+        ypos = img.shape[0] / 2
+
+    if xpos is None:
+        xpos = img.shape[1] / 2
+
     initial = Parameters()
     initial.add("height", value=intensity, min=0)
     initial.add("background", value=offset, vary=True)
-    initial.add("centroid_x", value=img.shape[1] / 2, vary=True)
-    initial.add("centroid_y", value=img.shape[0] / 2, vary=True)
-    initial.add("sigma_x", value=img.shape[0] / 4)
-    initial.add("sigma_y", value=img.shape[0] / 4)
+    initial.add("centroid_x", value=xpos, vary=True)
+    initial.add("centroid_y", value=ypos, vary=vary_centroid)
+    initial.add("sigma_x", value=-200, max=-150)
+    initial.add("sigma_y", value=400, min=200)
+
+    init_curve = gaussian2D(xf, yf,
+                                   initial["centroid_x"],
+                                   initial["centroid_y"],
+                                   initial["sigma_x"],
+                                   initial["sigma_y"],
+                                   initial["background"],
+                                   initial["height"]).reshape((img.shape))
+
+    if plot:
+        fig, ax = plt.subplots(ncols=2, nrows=1)
+
+        plt.axis("off")
+        ax[0].set_title("Image")
+        ax[0].imshow(img, cmap="magma")
+
+        ax[1].set_title("Initial background")
+        ax[1].imshow(init_curve, cmap="magma")
+
+        plt.show()
 
     fit = minimize(residuals, initial, args=(xf, yf, img))
     print(report_fit(fit))
@@ -168,20 +186,20 @@ def fit_2d_gaussian(img,intensity, offset, plot=False):
     res = fit.params
 
     fit_curve = gaussian2D(xf, yf,
-                               res["centroid_x"],
-                               res["centroid_y"],
-                               res["sigma_x"],
-                               res["sigma_y"],
-                               res["background"],
-                               res["height"]).reshape((img.shape))
+                                  res["centroid_x"],
+                                  res["centroid_y"],
+                                  res["sigma_x"],
+                                  res["sigma_y"],
+                                  res["background"],
+                                  res["height"]).reshape((img.shape))
 
     init_curve = gaussian2D(xf, yf,
-                               initial["centroid_x"],
-                               initial["centroid_y"],
-                               initial["sigma_x"],
-                               initial["sigma_y"],
-                               initial["background"],
-                               initial["height"]).reshape((img.shape))
+                            initial["centroid_x"],
+                            initial["centroid_y"],
+                            initial["sigma_x"],
+                            initial["sigma_y"],
+                            initial["background"],
+                            initial["height"]).reshape((img.shape))
 
     if plot:
         fig, ax = plt.subplots(ncols=3, nrows=1)
@@ -195,6 +213,7 @@ def fit_2d_gaussian(img,intensity, offset, plot=False):
 
         ax[2].set_title("Fitted background")
         ax[2].imshow(fit_curve, cmap="magma")
+        plt.show()
 
     return fit_curve, res
 
@@ -431,126 +450,158 @@ def rebin(a, shape):
     sh = shape[0],a.shape[0]//shape[0],shape[1],a.shape[1]//shape[1]
     return a.reshape(sh).mean(-1).mean(1)
 
-if __name__ == '__main__':
-    obj_path = "D:\\raw_images\\AAAA"
-    ff_path = "D:\\raw_images\\AAAA\\bg"
-    dark_img_path = "D:\\raw_images\\AAAA\\46"
-    output_path = "D:\\starlight_image_processing\\outputs\\AAAA_2\\"
+def load_images(momentum_list: list[float],
+                obj_path: str,
+                dark_path: str,
+                nexus_path: str,
+                obj_outpath: str,
+                maskx: tuple[int, int] | None = None,
+                masky: tuple[int, int] | None = None,
+                title: str="Imgs"):
 
-    nexus_path_obj = "C:\\Users\\sec90771\\OneDrive - University College London\\Experiment data\\June26\\nexus\\AAAA\\"
-    nexus_path_bright = "C:\\Users\\sec90771\\OneDrive - University College London\\Experiment data\\June26\\nexus\\AAAA bg\\"
-    ff_output_path = "D:\\starlight_image_processing\\bgs\\"
-    cmap = "magma"
+    imgstack = []
 
-    colors = ["pink", "purple", "black", "blue", "green"]
-    nodes = [0.0, 0.3, 0.5, 0.7, 1]
-    cmap2 = mcolors.LinearSegmentedColormap.from_list("mycmap", list(zip(nodes, colors)))
-    #cmap = mcolors.LinearSegmentedColormap.from_list("mycmap", colors)
+    # Load number of counts in each image
+    delayed_counts_obj = dict(sorted(load_counts(nexus_path).items()))
 
-    img_arrays = []
-    imgs = []
-    filenames = []
+    # Load dark image
+    dark_img = load_folder(dark_path, show_image=False, maskx=maskx, masky=masky)
 
-    #masky_init = [100, -80]
-    maskx_init = [500, -350]
-    maskx_init = [300, -200]
-
-    bg_shift = [0, 0]
-
-    shifted = [66, 64]
-
-    delayed_counts_obj = dict(sorted(load_counts(nexus_path_obj).items()))
-    delayed_counts_bright = dict(sorted(load_counts(nexus_path_bright).items()))
-    #delayed_counts_dark = delayed_counts_bright[54]
-
-    #dark_img = load_folder(dark_img_path, show_image=True, maskx=maskx_init)
-
+    # Plot muon count distribution
     plt.figure()
-    plt.title("AAAA")
-
-    plt.plot(delayed_counts_bright.keys(), delayed_counts_bright.values(), "o-", ms=5, label="Bright-field")
-    plt.plot(delayed_counts_obj.keys(), delayed_counts_obj.values(), "o-", ms=5, label="Object")
-
+    plt.title(title)
+    plt.plot(delayed_counts_obj.keys(), delayed_counts_obj.values(), "o-", ms=5)
     plt.xlabel("Momentum")
     plt.ylabel("Delayed counts")
-    plt.legend()
     plt.show()
-
-    #momentum_list = [68, 70, 72, 74]
-    momentum_list = [44, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74]
 
     pixel_sums = []
     pixel_medians = []
     momenta = []
 
+    # search for files in specified folder
     for momentum in momentum_list:
-        dark_img = load_folder(dark_img_path, show_image=False, maskx=maskx_init)
+        obj_folder = obj_path + f"\\{momentum}"
+        n_muons = delayed_counts_obj[momentum]
 
         try:
-            obj_folder = obj_path + f"\\{momentum}"
-            ff_folder = ff_path + f"\\{momentum}"
+            # IMAGE
+            obj_img = (load_folder(obj_folder, show_image=False, maskx=maskx, masky=masky))
 
-            n_muons = delayed_counts_obj[momentum]
-            n_brights = delayed_counts_bright[momentum]
-
-            obj_img = (load_folder(obj_folder, show_image=False, maskx=maskx_init) / n_muons) * 1e6
-
-            pixel_sums.append(np.sum(obj_img))
-            pixel_medians.append(np.median(obj_img))
-            momenta.append(momentum)
-
-            n_target = np.sum(obj_img[:, 73]) + np.sum(obj_img[:, 831])
-            n_dark = np.sum(dark_img[:, 73]) + np.sum(dark_img[:, 831])
-
-            obj_img = (obj_img / n_target) * n_dark
-            obj_img = obj_img #- dark_img
-            # img[:, 831]
-
-            obj_img = percentile_stretching(obj_img, cutoff_percentile=1)
-            #obj_img = scipy.signal.medfilt(obj_img, 3)
-
-            Image.fromarray(obj_img).save(f"{output_path}{momentum}_MED.tif")
-
-            """
-            obj_img, L, S = run_pca(obj_img-dark_img, show_image=True)
-            Image.fromarray(L).save(f"{output_path}{momentum}_low_rank.tif")
-            Image.fromarray(S).save(f"{output_path}{momentum}_sparse.tif")
-            """
-
-            #ff_img = load_folder(ff_folder, show_image=False, maskx=maskx_init, masky=masky_init, cutoff_percentile=2)
-            #Image.fromarray(ff_img).save(f"{output_path}bg\\{momentum}_MED.tif")
-
-            ff_img = (load_folder(ff_folder, show_image=False, maskx=maskx_init) / n_muons) * 1e6
-            # show_image(obj_img, "obj", (0, 255))
-
-            n_target = np.sum(ff_img[:, 73]) + np.sum(ff_img[:, 831])
-            n_dark = np.sum(dark_img[:, 73]) + np.sum(dark_img[:, 831])
-
-            ff_img = (ff_img / n_target) * n_dark
-            ff_img = ff_img #- dark_img
-
-            ff_img = percentile_stretching(ff_img, cutoff_percentile=1)
-            #ff_img = scipy.signal.medfilt(ff_img, 3)
-            Image.fromarray(ff_img).save(f"{ff_output_path}{momentum}_MED.tif")
-
-            """
-            ff_img, L, S = run_pca(ff_img-dark_img, show_image=True)
-            Image.fromarray(L).save(f"{output_path}bg\\{momentum}_low_rank.tif")
-            Image.fromarray(S).save(f"{output_path}bg\\{momentum}_sparse.tif")
-            """
-
-        except (FileNotFoundError, FileExistsError) as e:
-            print(str(momentum) + f" data not found at {obj_folder} or {ff_folder} or {dark_img_path}")
+        except FileNotFoundError:
+            print(str(momentum) + f" data not found at {obj_folder}")
             continue
 
+        print(f"Loaded folder {obj_folder}!")
+
+        px_sum = np.sum(obj_img[0:300, :] + np.sum(obj_img[:, 0:100]))
+        px_med = np.median(obj_img[0:300, :] + np.median(obj_img[:, 0:100]))
+
+        pixel_medians.append(px_med)
+        pixel_sums.append(px_sum)
+        momenta.append(momentum)
+
+        """
+        n_target = np.sum(obj_img[:, 73]) + np.sum(obj_img[:, 831])
+        n_dark = np.sum(dark_img[:, 73]) + np.sum(dark_img[:, 831])
+
+        obj_img = (obj_img / n_target) * n_dark
+        obj_img = obj_img - dark_img
+        """
+
+        n_dark = np.sum(obj_img[0:300, :] + np.sum(obj_img[:, 0:100]))
+
+        obj_img = (obj_img / px_sum) * n_dark
+        obj_img = obj_img - dark_img
+
+        obj_img = percentile_stretching(obj_img, cutoff_percentile=1)
+        #obj_img = scipy.ndimage.median_filter(obj_img, 3)
+
+        pil_img = Image.fromarray(obj_img)
+        pil_img.save(f"{obj_outpath}{momentum}_MED.tif")
+
+        imgstack.append(pil_img)
+
     plt.figure()
+    plt.title(title + "sum")
     plt.plot(momenta, pixel_sums)
     plt.xlabel("Momentum")
     plt.ylabel("Pixel sum")
     plt.show()
 
     plt.figure()
-    plt.plot(momenta, pixel_sums)
+    plt.title(title + " med")
+    plt.plot(momenta, pixel_medians)
     plt.xlabel("Momentum")
-    plt.ylabel("Pixel sum")
+    plt.ylabel("Pixel medians")
     plt.show()
+
+    return imgstack
+
+if __name__ == '__main__':
+    cmap = "magma"
+
+    colors = ["pink", "purple", "black", "blue", "green"]
+    nodes = [0.0, 0.3, 0.5, 0.7, 1]
+    cmap2 = mcolors.LinearSegmentedColormap.from_list("mycmap", list(zip(nodes, colors)))
+    maskx_init = (100, -100)
+
+    momentum_list_AAAA = [44, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 74]
+    momentum_list_AAAA_ff = momentum_list_AAAA
+
+    momentum_list_9V = np.arange(56, 92, 2)
+    momentum_list_9V_ff = np.arange(76, 92, 2)
+
+    """
+    imgs = load_images(momentum_list=momentum_list_AAAA,
+                obj_path="D:\\raw_images\\AAAA",
+                dark_path="D:\\raw_images\\AAAA\\46",
+                nexus_path="C:\\Users\\sec90771\\OneDrive - University College London\\Experiment data\\June26\\nexus\\AAAA\\",
+                obj_outpath="D:\\starlight_image_processing\\AAAA\\",
+                maskx=maskx_init,
+                title="AAAA")
+    
+    im = create_huge_image(imgs, ncols=5, nrows=5, names=momentum_list_AAAA)
+    im.show()
+    
+    
+
+    imgs = load_images(momentum_list=momentum_list_AAAA_ff,
+                obj_path="D:\\raw_images\\AAAA\\bg",
+                dark_path="D:\\raw_images\\AAAA\\46",
+                nexus_path="C:\\Users\\sec90771\\OneDrive - University College London\\Experiment data\\June26\\nexus\\AAAA bg\\",
+                obj_outpath="D:\\starlight_image_processing\\flatfields\\",
+                maskx=maskx_init,
+                title="AAAA flatfield")
+
+    create_huge_image(imgs, ncols=5, nrows=5, names=momentum_list_AAAA)
+    im.show()
+
+    """
+
+    imgs = load_images(momentum_list=momentum_list_9V,
+                obj_path="D:\\raw_images\\9V_Toshiba",
+                dark_path="D:\\raw_images\\AAAA\\46",
+                nexus_path="C:\\Users\\sec90771\\OneDrive - University College London\\Experiment data\\June26\\nexus\\9V\\",
+                obj_outpath="D:\\starlight_image_processing\\9V\\",
+                maskx=maskx_init,
+                title="9V")
+
+    im = create_huge_image(imgs, ncols=5, nrows=5, names=momentum_list_9V)
+    im.show()
+    im.save("9V_raw.tif")
+
+    imgs = load_images(momentum_list=momentum_list_9V_ff,
+                obj_path="D:\\raw_images\\9V_Toshiba\\bg",
+                dark_path="D:\\raw_images\\AAAA\\46",
+                nexus_path="C:\\Users\\sec90771\\OneDrive - University College London\\Experiment data\\June26\\nexus\\9V bg\\",
+                obj_outpath="D:\\starlight_image_processing\\flatfields\\",
+                maskx=maskx_init,
+                title="9V flatfield")
+
+    im = create_huge_image(imgs, ncols=5, nrows=5, names=momentum_list_9V_ff)
+    im.show()
+    im.save("9V_ff_raw.tif")
+
+
+

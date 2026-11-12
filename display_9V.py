@@ -10,8 +10,8 @@ from process import create_huge_image, percentile_stretching, open_beam_normalis
     percentile_stretching_2, fit_2d_gaussian_masked
 
 if __name__ == "__main__":
-    folder = "D:\\starlight_image_processing\\outputs\\9V\\"
-    bg_folder = "D:\\starlight_image_processing\\bgs\\9V\\"
+    folder = "D:\\starlight_image_processing\\9V\\"
+    bg_folder = "D:\\starlight_image_processing\\flatfields\\fitted_standard_gauss\\9V\\"
 
     momentum_list = np.arange(56, 92, 2)
     bg_momentum_list = momentum_list
@@ -27,8 +27,8 @@ if __name__ == "__main__":
     save = True
 
     gifsave = True
-    output_path = "D:\\starlight_image_processing\\outputs\\9V\\"
-    save_dest = "C:\\Users\\sec90771\\OneDrive - University College London\\Pictures\\9V images\\gaussian fitted\\"
+    output_path = "D:\\starlight_image_processing\\processed\\9V\\"
+    save_dest = "C:\\Users\\sec90771\\OneDrive - University College London\\Pictures\\9V images\\gaussian fitted_standard_gauss\\"
     use_saved_bg = False
 
     # open beam normalisation on side edge
@@ -56,26 +56,31 @@ if __name__ == "__main__":
 
     for i, momentum in enumerate(momentum_list):
         path = folder + f"{momentum}_MED.tif"
-        bg_path = f"{bg_folder}//{momentum}_MED.tif"
+        ff_path = f"{bg_folder}{momentum}_MED.tif"
 
         try:
             img_raw = np.array(Image.open(path))
-            img = img_raw[:-130, :]
 
         except FileNotFoundError:
             print(f"{path} not found")
             continue
 
-        print(f"processing {path}")
-        #fitted_bg = fit_2d_gaussian(bg, intensity=10, offset=0, plot=True)
+        try:
+            ff_raw = np.array(Image.open(ff_path))
 
-        maskx = (230, 670)
-        masky = (30, 932)
+        except FileNotFoundError:
+            print(f"{ff_path} not found")
+            continue
 
 
-        #fitted_bg = np.array(Image.open(f"{bg_folder}{momentum}_MED.tif"))
-        fitted_bg = np.load(f"D:\\starlight_image_processing\\bgs\\fitted\\{momentum}.npy")
-        #fitted_bg = fitted_bg[:-130, :]
+        #maskx = (230, 670)
+        maskx = (150, 750)
+        masky = (30, 842)
+
+        img_raw = img_raw[masky[0]:masky[1], maskx[0]:maskx[1]]
+        ff_raw = ff_raw[masky[0]:masky[1], maskx[0]:maskx[1]]
+
+        #bg = np.array(Image.open(f"D:\\starlight_image_processing\\flatfields\\fitted_standard_gauss\\9V\\{momentum}_MED.tif"))
 
         """
         elif use_saved_bg:
@@ -98,28 +103,25 @@ if __name__ == "__main__":
         momenta.append(momentum)
         """
 
-        bg = fitted_bg
-
-        corr = np.nan_to_num(img / bg, nan=0)
-        corr = percentile_stretching(corr, cutoff_percentile=2)
+        corr = np.nan_to_num(img_raw / ff_raw, nan=1)
+        corr = percentile_stretching(corr, cutoff_percentile=1)
         #corr = percentile_stretching_2(corr, perc=2, overflow=1)
 
-        final_mask_x = [150, -150]
-        final_mask_y = [1, -1]
+        #final_mask_x = [150, -150]
+        #final_mask_y = [1, -1]
 
         # apply final mask
-        corr = corr[final_mask_y[0]:final_mask_y[1], final_mask_x[0]:final_mask_x[1]]
+        #corr = corr[final_mask_y[0]:final_mask_y[1], final_mask_x[0]:final_mask_x[1]]
 
         if plot:
             fig, ax = plt.subplots(ncols=3)
             fig.suptitle(f"momentum={momentum}")
-            ax[0].imshow(img)
+            ax[0].imshow(img_raw)
             ax[0].set_title("object image")
-            ax[1].imshow(bg)
+            ax[1].imshow(ff_raw)
             ax[1].set_title("bright field")
             ax[2].imshow(corr)
             ax[2].set_title("correction")
-
             plt.show()
 
         plt.imshow(corr, cmap=cmap)
@@ -140,7 +142,7 @@ if __name__ == "__main__":
 
         raw_image = Image.open(bytes)
 
-        plt.imshow(bg, cmap=cmap)
+        plt.imshow(ff_raw, cmap=cmap)
         plt.axis('off')
 
         bytes = BytesIO()

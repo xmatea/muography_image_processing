@@ -28,7 +28,7 @@ if __name__ == "__main__":
 
     gifsave = True
     output_path = "D:\\starlight_image_processing\\outputs\\9V\\"
-    save_dest = "C:\\Users\\sec90771\\OneDrive - University College London\\Pictures\\9V images\\gaussian fitted\\"
+    save_dest = "C:\\Users\\sec90771\\OneDrive - University College London\\Pictures\\9V images\\gaussian fitted_standard_gauss\\"
     use_saved_bg = False
 
     # open beam normalisation on side edge
